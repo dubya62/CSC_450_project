@@ -5,7 +5,7 @@
 
 #define BUF_SIZE 1024
 
-FILE* convert_pcap_to_csv(char* filename, char* outputFilename){
+FILE* convert_pcap_to_csv(char* filename){
     char buffer[BUF_SIZE];
 
     snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e _ws.col.info", filename);
@@ -86,13 +86,10 @@ typedef struct {
     } while (0)
 
 // Every pointer is an allocation, so either free or just agree that memory management is boring.
-Row *parse_csv(path)
-    const char *path;
+Row *parse_csv(fp)
+    FILE* fp;
 {
-
     Rows rows = { 0 };
-    FILE *fp = fopen(path, "r");
-    if (!fp) PANIC("Cannot open file for reading '%s': %m", path);
 
     char buf[BUF_SIZE] = { 0 };
     fgets(buf, BUF_SIZE, fp); // skip first line
@@ -119,8 +116,16 @@ Row *parse_csv(path)
     return NULL;
 }
 
-int main(void)
-{
-    parse_csv("output.csv");
+int main(int argc, char** argv){
+    
+    if (argc < 2){
+        PANIC("Please supply the input file as an arg.");
+    }
+
+    char* filename = argv[1];
+
+    FILE* csvFile = convert_pcap_to_csv(filename);
+
+    parse_csv(csvFile);
     return 0;
 }
