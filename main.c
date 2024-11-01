@@ -49,13 +49,11 @@ char *read_column(ptr)
         *ptr += 1;
         return ret;
     }
-    if (**ptr != '"') PANIC("Expected '\"' at start of column, got '%.*s'", 8, *ptr);
-    *ptr += 1;
 
     char *ret = *ptr;
 
     char skip = 0;
-    for (;**ptr && **ptr != '"'; *ptr += 1) {
+    for (;**ptr && **ptr != ','; *ptr += 1) {
         if (skip) {
             skip = 0;
             continue;
@@ -92,7 +90,6 @@ Row *parse_csv(fp)
     Rows rows = { 0 };
 
     char buf[BUF_SIZE] = { 0 };
-    fgets(buf, BUF_SIZE, fp); // skip first line
     while (fgets(buf, BUF_SIZE, fp)) {
         size_t len = strlen(buf);
         if (buf[len - 1] == '\n') buf[--len] = '\0';
