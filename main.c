@@ -53,13 +53,14 @@ char *read_column(ptr)
     char *ret = *ptr;
 
     char skip = 0;
-    for (;**ptr && **ptr != ','; *ptr += 1) {
+    for (;**ptr; *ptr += 1) {
         if (skip) {
             skip = 0;
             continue;
         }
 
         if (**ptr == '\\') skip = 1;
+        if (**ptr == ',') break;
     }
     *(*ptr)++ = '\0';
     if (**ptr == ',') *ptr += 1;
@@ -84,7 +85,7 @@ typedef struct {
     } while (0)
 
 // Every pointer is an allocation, so either free or just agree that memory management is boring.
-Row *parse_csv(fp)
+Rows parse_csv(fp)
     FILE* fp;
 {
     Rows rows = { 0 };
@@ -110,7 +111,35 @@ Row *parse_csv(fp)
     for (size_t i = 0; i < rows.count; ++i) {
         printf("info %d = %d\n", i, rows.items[i].no);
     }
-    return NULL;
+    return rows;
+}
+
+void print_rows(rows)
+    Rows rows;
+{
+    for (size_t i = 0; i < rows.count; ++i) {
+        printf("Row {\n\
+    no = %d,\n\
+    time = %lf,\n\
+    source = \"%s\",\n\
+    destination = \"%s\",\n\
+    protocol = %d,\n\
+    length = %ld,\n\
+    tcp_segment_len = %ld,\n\
+    tcp_delta = %lf,\n\
+    info = \"%s\",\n\
+}\n",
+                rows.items[i].no,
+                rows.items[i].time,
+                rows.items[i].source,
+                rows.items[i].destination,
+                rows.items[i].protocol,
+                rows.items[i].length,
+                rows.items[i].tcp_segment_len,
+                rows.items[i].tcp_delta,
+                rows.items[i].info
+          );
+    }
 }
 
 int main(int argc, char** argv){
@@ -123,6 +152,7 @@ int main(int argc, char** argv){
 
     FILE* csvFile = convert_pcap_to_csv(filename);
 
-    parse_csv(csvFile);
+    Rows rows = parse_csv(csvFile);
+    print_rows(rows);
     return 0;
 }
