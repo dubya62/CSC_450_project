@@ -8,7 +8,7 @@
 FILE* convert_pcap_to_csv(char* filename){
     char buffer[BUF_SIZE];
 
-    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e _ws.col.info", filename);
+    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e _ws.col.info -e tcp.flags", filename);
 
     FILE* pipe = popen(buffer, "r");
 
@@ -37,6 +37,7 @@ typedef struct {
     size_t length;
     size_t tcp_segment_len;
     double tcp_delta;
+    int tcp_flags;
     char *info;
 } Row;
 
@@ -104,6 +105,7 @@ Rows parse_csv(fp)
         row.length = atol(read_column(&line));
         row.tcp_segment_len = atoi(read_column(&line));
         row.tcp_delta = atof(read_column(&line));
+        row.tcp_flags = atoi(read_column(&line));
         row.info = *line ? strdup(read_column(&line)) : NULL;
         da_append(&rows, row);
     }
@@ -127,6 +129,7 @@ void print_rows(rows)
     length = %ld,\n\
     tcp_segment_len = %ld,\n\
     tcp_delta = %lf,\n\
+    tcp_flags = 0x%x,\n\
     info = \"%s\",\n\
 }\n",
                 rows.items[i].no,
@@ -137,15 +140,26 @@ void print_rows(rows)
                 rows.items[i].length,
                 rows.items[i].tcp_segment_len,
                 rows.items[i].tcp_delta,
+                rows.items[i].tcp_flags,
                 rows.items[i].info
           );
     }
 }
 
+/////////////////////////////
+// checking the bits of flags to see if SYN, ACK, or SYNACK (0 if neither
+#define ACK 1
+#define SYN 2
+#define SYNACK 3
+#define getTcpType(row) (((row.tcp_flags & 0x10) >> 4) | (row.tcp_flags & 0x2))
+
+/////////////////////////////
+
 int main(int argc, char** argv){
     
     if (argc < 2){
-        PANIC("Please supply the input file as an arg.");
+        fprintf(stderr, "Please supply the input file as an arg.");
+        return 1;
     }
 
     char* filename = argv[1];
@@ -154,5 +168,7 @@ int main(int argc, char** argv){
 
     Rows rows = parse_csv(csvFile);
     print_rows(rows);
+
+
     return 0;
 }
