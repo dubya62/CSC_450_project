@@ -8,7 +8,7 @@
 FILE* convert_pcap_to_csv(char* filename){
     char buffer[BUF_SIZE];
 
-    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e _ws.col.info -e tcp.flags", filename);
+    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e _ws.col.info", filename);
 
     FILE* pipe = popen(buffer, "r");
 
@@ -95,7 +95,8 @@ Rows parse_csv(fp)
     while (fgets(buf, BUF_SIZE, fp)) {
         size_t len = strlen(buf);
         if (buf[len - 1] == '\n') buf[--len] = '\0';
-        char *line = strdup(buf);
+        char *line = buf;
+        printf("line = %s\n", line);
         Row row = { 0 };
         row.no = atoi(read_column(&line));
         row.time = atof(read_column(&line));
@@ -105,8 +106,9 @@ Rows parse_csv(fp)
         row.length = atol(read_column(&line));
         row.tcp_segment_len = atoi(read_column(&line));
         row.tcp_delta = atof(read_column(&line));
-        row.tcp_flags = atoi(read_column(&line));
-        row.info = *line ? strdup(read_column(&line)) : NULL;
+        char *flags_col = read_column(&line);
+        row.tcp_flags = *flags_col ? strtol(flags_col + 2, NULL, 16) : 0;
+        row.info = strdup(line);
         da_append(&rows, row);
     }
 
@@ -129,7 +131,7 @@ void print_rows(rows)
     length = %ld,\n\
     tcp_segment_len = %ld,\n\
     tcp_delta = %lf,\n\
-    tcp_flags = 0x%x,\n\
+    tcp_flags = 0x%04x,\n\
     info = \"%s\",\n\
 }\n",
                 rows.items[i].no,
@@ -158,7 +160,7 @@ void print_rows(rows)
 int main(int argc, char** argv){
     
     if (argc < 2){
-        fprintf(stderr, "Please supply the input file as an arg.");
+        fprintf(stderr, "Please supply the input file as an arg.\n");
         return 1;
     }
 
