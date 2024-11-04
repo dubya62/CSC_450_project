@@ -283,7 +283,15 @@ int handleCongestionEvents(Rows rows){
             } else {
                 da_append(&conversation.acks, ((Entry) { .key = rows.items[i].tcp_ack, .value = 1 }));
             }
-        } 
+        } else { // if this is not an ack, check for retransmission
+            size_t *entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
+            if (entry){
+                *entry += 1;
+            } else {
+                da_append(&conversation.seqs, ((Entry) { .key = rows.items[i].tcp_seq, .value = 1 }));
+            }
+            
+        }
         if (tcpType & SYN){
             size_t *entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_ack);
             if (entry) {
@@ -293,10 +301,23 @@ int handleCongestionEvents(Rows rows){
             }
         }         
         // if there are 4 acks of the same ack print it
-        size_t *count = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
+        size_t* count = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
         if (count && *count >= 4) {
             printf("Triple duplicate ack!\n");
         }
+
+        // if there are 2 seqs of the same seq print it
+        count = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
+        if (count && *count >= 2) {
+            printf("Retransmission!\n");
+        }
+
+        // check window size
+        if (rows.items[i].tcp_window_size < 10){
+            printf("Window size too small!\n");
+        }
+
+
     }
 
     return 0;
@@ -318,7 +339,7 @@ int main(int argc, char** argv){
     printf("\n"); // make jumping easier in tmux
     handleCongestionEvents(rows);
     printf("\n"); // make jumping easier in tmux
-    write_csv(stdout, rows);
+    //write_csv(stdout, rows);
 
     return 0;
 }
