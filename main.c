@@ -15,17 +15,17 @@ FILE* convert_pcap_to_csv(char* filename){
     return pipe;
 }
 
-#define DBG(...) do {                             \
-    printf("[DBG] %s:%d ", __FILE__, __LINE__);   \
-    printf(__VA_ARGS__);                          \
-    printf("\n");                                 \
+#define DBG(...) do {                                      \
+    fprintf(stderr, "[DBG] %s:%d ", __FILE__, __LINE__);   \
+    fprintf(stderr, __VA_ARGS__);                          \
+    fprintf(stderr, "\n");                                 \
 } while (0);
 
-#define PANIC(...) do {                           \
-    printf("[PANIC] %s:%d ", __FILE__, __LINE__); \
-    printf(__VA_ARGS__);                          \
-    printf("\n");                                 \
-    exit(1);                                      \
+#define PANIC(...) do {                                    \
+    fprintf(stderr, "[PANIC] %s:%d ", __FILE__, __LINE__); \
+    fprintf(stderr, __VA_ARGS__);                          \
+    fprintf(stderr, "\n");                                 \
+    exit(1);                                               \
 } while (0);
 
 typedef struct {
@@ -43,6 +43,16 @@ typedef struct {
     size_t tcp_window_size;
     char *info;
 } Row;
+
+void remove_chars(char *s, char c) {
+    int i = 0;
+    for (char *v = s; *v; v++) {
+        if (*v != c) {
+            s[i++] = *v;
+        }
+    }
+    s[i] = '\0';
+}
 
 char *read_column(ptr)
     char **ptr;
@@ -68,6 +78,7 @@ char *read_column(ptr)
     }
     *(*ptr)++ = '\0';
     if (**ptr == ',') *ptr += 1;
+    remove_chars(ret, '\\');
     return ret;
 }
 
@@ -87,6 +98,17 @@ typedef struct {
                                                                                          \
         (da)->items[(da)->count++] = (item);                                             \
     } while (0)
+
+typedef struct {
+    size_t key;
+    size_t value;
+} Entry;
+
+typedef struct {
+    Entry *items;
+    size_t count;
+    size_t capacity;
+} Dict;
 
 // Every pointer is an allocation, so either free or just agree that memory management is boring.
 Rows parse_csv(fp)
@@ -114,34 +136,62 @@ Rows parse_csv(fp)
         row.tcp_ack = atol(read_column(&line));
         row.tcp_seq = atol(read_column(&line));
         row.tcp_window_size = atol(read_column(&line));
-        row.info = strdup(line);
+        char *info = strdup(line);
+        remove_chars(info, '\\');
+        row.info = info;
         da_append(&rows, row);
     }
-
-    for (size_t i = 0; i < rows.count; ++i) {
-        printf("info %d = %d\n", i, rows.items[i].no);
-    }
     return rows;
+}
+
+char *escape_quotes(char *str) {
+    size_t count = 0;
+    for (char *s = str; *s; count += *(s++) == '"');
+    size_t len = strlen(str) + count + 1;
+    char *out = malloc(len);
+    size_t i = 0;
+    for (char *s = str; *s && i < len - 1; ++s) {
+        if (*s == '"') {
+            out[i++] = '\\';
+            out[i++] = '"';
+        } else {
+            out[i++] = *s;
+        }
+    }
+    return out;
+}
+
+void write_csv(FILE *out, Rows rows) {
+    for (size_t i = 0; i < rows.count; ++i) {
+        Row row = rows.items[i];
+        fprintf(out, "%d,", row.no);
+        fprintf(out, "%f,", row.time);
+        char *s = escape_quotes(row.source);
+        fprintf(out, "\"%s\",", s);
+        free(s);
+        s = escape_quotes(row.destination);
+        fprintf(out, "\"%s\",", s);
+        free(s);
+        fprintf(out, "%d,", row.protocol);
+        fprintf(out, "%ld,", row.length);
+        fprintf(out, "%ld,", row.tcp_segment_len);
+        fprintf(out, "%f,", row.tcp_delta);
+        fprintf(out, "0x%04x,", row.tcp_flags);
+        fprintf(out, "%ld,", row.tcp_ack);
+        fprintf(out, "%ld,", row.tcp_seq);
+        fprintf(out, "%ld,", row.tcp_window_size);
+        s = escape_quotes(row.info);
+        fprintf(out, "\"%s\"", s);
+        free(s);
+        fprintf(out, "\n");
+    }
 }
 
 void print_rows(rows)
     Rows rows;
 {
     for (size_t i = 0; i < rows.count; ++i) {
-        printf("Row {\n\
-    no = %d,\n\
-    time = %lf,\n\
-    source = \"%s\",\n\
-    destination = \"%s\",\n\
-    protocol = %d,\n\
-    length = %ld,\n\
-    tcp_segment_len = %ld,\n\
-    tcp_delta = %lf,\n\
-    tcp_flags = 0x%04x,\n\
-    tcp_ack = %ld,\n\
-    tcp_seq = %ld,\n\
-    tcp_window_size = %ld,\n\
-    info = \"%s\",\n }\n",
+        printf("Row { no = %d, time = %lf, source = \"%s\", destination = \"%s\", protocol = %d, length = %ld, tcp_segment_len = %ld, tcp_delta = %lf, tcp_flags = 0x%04x, tcp_ack = %ld, tcp_seq = %ld, tcp_window_size = %ld, info = \"%s\" }\n",
                 rows.items[i].no,
                 rows.items[i].time,
                 rows.items[i].source,
@@ -161,173 +211,8 @@ void print_rows(rows)
 
 /////////////////////////////
 // checking the bits of flags to see if SYN, ACK, or SYNACK (0 if neither
-#define ACK 1
-#define SYN 2
-#define SYNACK 3
-#define getTcpType(row) (((row.tcp_flags & 0x10) >> 4) | (row.tcp_flags & 0x2))
-
-/////////////////////////////
-// Tree data structure definition
-typedef struct TreeNode{
-    int active; // 4 bytes - whether or not this is an actual node
-    size_t value; // 8 bytes
-    int count; // special field for counting occurences 4 bytes
-
-} TreeNode;
-
-typedef struct Tree{
-    size_t capacity;
-    TreeNode* data;
-} Tree;
-
-
-Tree* initTree(size_t capacity){
-    Tree* result = (Tree*) malloc(sizeof(Tree));
-    result->capacity = capacity;
-    size_t allocationSize = sizeof(TreeNode) * capacity;
-    result->data = (TreeNode*) malloc(allocationSize);
-    memset(result->data, 0, allocationSize);
-    return result;
-}
-
-
-// get indices of interest. -1 if invalid
-#define getLeftChild(tree, index) (-1 * ((index << 1) + 1 >= tree->capacity) + ((index << 1) + 1) * (((index) << 1) + 1< tree->capacity))
-#define getRightChild(tree, index) (-1 * ((index << 1) + 2 >= tree->capacity) + ((index << 1) + 2) * ((index << 1) + 2 < tree->capacity))
-#define getParent(tree, index) ((-1 * (index == 0)) + ((index-1) >> 1) * (index != 0))
-
-// returns index of the value or -1 if not in the tree
-size_t valueIsInTree(Tree* tree, size_t value){
-    size_t curr = 0;
-    while (1){
-        if (!(tree->data[curr].active)){
-            return -1;
-        }
-        if (tree->data[curr].value == value){
-            return curr;
-        } 
-        if (tree->data[curr].value > value){
-            curr = getLeftChild(tree, curr);
-        } else {
-            curr = getRightChild(tree, curr);
-        }
-        if (curr == -1){
-            return curr;
-        }
-    }
-}
-
-// creates a new node if the element does not exists
-// or increases the count if it does
-// return 1 if a new node was created, 0 if added to the count, or -1 if no room
-int addValueToTree(Tree* tree, size_t value){
-    size_t curr = 0;
-    while (1){
-        if (!(tree->data[curr].active)){
-            // this is where it should go
-            tree->data[curr].active = 1;
-            tree->data[curr].value = value;
-            tree->data[curr].count = 1;
-            return 1;
-        }
-        if (tree->data[curr].value == value){
-            // increment the count
-            tree->data[curr].count++;
-            return 0;
-        }
-        if (tree->data[curr].value > value){
-            curr = getLeftChild(tree, curr);
-        } else {
-            curr = getRightChild(tree, curr);
-        }
-        if (curr == -1){
-            return -1;
-        }
-    }
-}
-
-// remove a given index from the tree and replace it with its successor
-int handleRemovedNode(Tree* tree, size_t index){
-    // go left, then right as far as possible
-    int leftExists = getLeftChild(tree, index);
-    if (leftExists == -1 || !(tree->data[leftExists].active)){
-        // go right, then left as far as possible
-        int rightExists = getRightChild(tree, index);
-        if (rightExists == -1 || !(tree->data[rightExists].active)){
-            // this node has no children. Exterminate
-            tree->data[index].active = 0;
-            return 0;
-        }
-        // now go left until a -1
-        int leftmost = rightExists;
-        while (leftmost != -1 && tree->data[leftmost].active){
-            rightExists = leftmost;
-            leftmost = getLeftChild(tree, leftmost);
-        }
-        tree->data[index].value = tree->data[rightExists].value;
-        tree->data[index].count= tree->data[rightExists].count;
-        // handle the node that was taken from
-        handleRemovedNode(tree, rightExists);
-        return 0;
-    }
-    // now go right until a -1
-    int rightmost = leftExists;
-    while (rightmost != -1 && tree->data[rightmost].active){
-        leftExists = rightmost;
-        rightmost = getRightChild(tree, rightmost);
-    }
-    tree->data[index].value = tree->data[leftExists].value;
-    tree->data[index].count = tree->data[leftExists].count;
-    // handle the node that was taken from
-    handleRemovedNode(tree, leftExists);
-    return 0;
-}
-
-// remove a node from a tree by value.
-// return 1 if a node was deleted; otherwise -1
-int removeValueFromTree(Tree* tree, size_t value){
-    size_t curr = 0;
-    while (1){
-        if (!(tree->data[curr].active)){
-            // this node does not exist
-            return -1;
-        }
-        if (tree->data[curr].value == value){
-            // delete this node
-            handleRemovedNode(tree, curr);
-            return 0;
-        }
-        if (tree->data[curr].value > value){
-            curr = getLeftChild(tree, curr);
-        } else {
-            curr = getRightChild(tree, curr);
-        }
-        if (curr == -1){
-            return -1;
-        }
-    }
-
-}
-
-// print tree
-int printSubtree(Tree* tree, size_t index){
-    int leftChild = getLeftChild(tree, index);
-    int rightChild = getRightChild(tree, index);
-    if (leftChild != -1){
-        printSubtree(tree, leftChild);
-    }
-    if (tree->data[index].active){
-        printf("%ld:%ld:%d\n", index, tree->data[index].value, tree->data[index].count);
-    }
-    if (rightChild != -1){
-        printSubtree(tree, rightChild);
-    }
-
-}
-int printTree(Tree* tree){
-    printf("Index:Value:Count\n");
-    printSubtree(tree, 0);
-}
+#define ACK (1 << 4)
+#define SYN (1 << 1)
 
 /////////////////////////////
 // Find and print congestion events from an array of Rows
@@ -335,8 +220,8 @@ int printTree(Tree* tree){
 typedef struct{
     char* source;
     char* destination;
-    Tree* acks;
-    Tree* seqs;
+    Dict acks;
+    Dict seqs;
 } Conversation;
 
 typedef struct {
@@ -345,17 +230,18 @@ typedef struct {
     size_t count;
 } Conversations;
 
-int compareConversations(Conversation* first, Conversation* second){
-    return !(strcmp(first->source, second->source) || (strcmp(first->destination, second->destination)));
+int compareConversations(Conversation first, Conversation second){
+    return !(strcmp(first.source, second.source) || (strcmp(first.destination, second.destination)));
 }
 
-Conversation* initConversation(char* source, char* destination){
-    Conversation* conversation = (Conversation*) malloc(sizeof(Conversation));
-    conversation->source = source;
-    conversation->destination = destination;
-    conversation->acks = initTree(25000);
-    conversation->seqs = initTree(25000);
-    return conversation;
+size_t *get_dict_entry(Dict dict, size_t key) {
+    for (size_t i = 0; i < dict.count; ++i) {
+        Entry *entry = &dict.items[i];
+        if (entry->key == key) {
+            return &entry->value;
+        }
+    }
+    return NULL;
 }
 
 Rows reno = { 0 };
@@ -364,7 +250,11 @@ Rows taho = { 0 };
 int handleCongestionEvents(Rows rows){
     // create a Conversation struct to keep track of duplicate acks for each conversation
     Conversations conversations = { 0 };
-    Conversation* conversation = initConversation(rows.items[0].source, rows.items[0].destination);
+    Conversation conversation = {
+        .source = rows.items[0].source,
+        .destination = rows.items[0].destination,
+        0
+    };
 
     for (size_t i=0; i<rows.count; i++){
         // triple duplicate ACKs.
@@ -372,41 +262,47 @@ int handleCongestionEvents(Rows rows){
         int same = 0;
         int found = 0;
         for (size_t j=0; j<conversations.count; j++){
-            conversation->source = rows.items[i].source;
-            conversation->destination = rows.items[i].destination;
-            same = compareConversations(conversation, conversations.items+j);
+            conversation.source = rows.items[i].source;
+            conversation.destination = rows.items[i].destination;
+            same = compareConversations(conversation, conversations.items[j]);
             if (same){
                 found = 1;
                 break;
             }
         }
         if (!found){
-            da_append(&conversations, *conversation);
+            da_append(&conversations, conversation);
         }
 
         // if this is an ack, add it to the tree
-        int tcpType = getTcpType(rows.items[i]);
+        int tcpType = rows.items[i].tcp_flags;
         if (tcpType & ACK){
-            addValueToTree(conversation->acks, rows.items[i].tcp_ack);
+            size_t *entry = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
+            if (entry) {
+                *entry += 1;
+            } else {
+                da_append(&conversation.acks, ((Entry) { .key = rows.items[i].tcp_ack, .value = 1 }));
+            }
         } 
         if (tcpType & SYN){
-            addValueToTree(conversation->seqs, rows.items[i].tcp_seq);
+            size_t *entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_ack);
+            if (entry) {
+                *entry += 1;
+            } else {
+                da_append(&conversation.seqs, ((Entry) { .key = rows.items[i].tcp_ack, .value = 1 }));
+            }
         }         
         // if there are 4 acks of the same ack print it
-        int conversationIndex = valueIsInTree(conversation->acks, rows.items[i].tcp_ack);
-        if (conversationIndex > 0 && conversation->acks->data[conversationIndex].count >= 4){
+        size_t *count = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
+        if (count && *count >= 4) {
             printf("Triple duplicate ack!\n");
         }
-        printTree(conversation->acks);
     }
 
     return 0;
 }
 
-/////////////////////////////
-
 int main(int argc, char** argv){
-    
     if (argc < 2){
         fprintf(stderr, "Please supply the input file as an arg.\n");
         return 1;
@@ -417,9 +313,12 @@ int main(int argc, char** argv){
     FILE* csvFile = convert_pcap_to_csv(filename);
 
     Rows rows = parse_csv(csvFile);
+    printf("\n"); // make jumping easier in tmux
     print_rows(rows);
-
+    printf("\n"); // make jumping easier in tmux
     handleCongestionEvents(rows);
+    printf("\n"); // make jumping easier in tmux
+    write_csv(stdout, rows);
 
     return 0;
 }
