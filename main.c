@@ -8,7 +8,7 @@
 FILE* convert_pcap_to_csv(char* filename){
     char buffer[BUF_SIZE];
 
-    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e tcp.ack -e tcp.seq -e _ws.col.info", filename);
+    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e tcp.ack -e tcp.seq -e tcp.window_size_value -e _ws.col.info", filename);
 
     FILE* pipe = popen(buffer, "r");
 
@@ -40,6 +40,7 @@ typedef struct {
     int tcp_flags;
     size_t tcp_ack;
     size_t tcp_seq;
+    size_t tcp_window_size;
     char *info;
 } Row;
 
@@ -112,6 +113,7 @@ Rows parse_csv(fp)
         row.tcp_flags = *flags_col ? strtol(flags_col + 2, NULL, 16) : 0;
         row.tcp_ack = atol(read_column(&line));
         row.tcp_seq = atol(read_column(&line));
+        row.tcp_window_size = atol(read_column(&line));
         row.info = strdup(line);
         da_append(&rows, row);
     }
@@ -138,8 +140,8 @@ void print_rows(rows)
     tcp_flags = 0x%04x,\n\
     tcp_ack = %ld,\n\
     tcp_seq = %ld,\n\
-    info = \"%s\",\n\
-}\n",
+    tcp_window_size = %ld,\n\
+    info = \"%s\",\n }\n",
                 rows.items[i].no,
                 rows.items[i].time,
                 rows.items[i].source,
@@ -151,6 +153,7 @@ void print_rows(rows)
                 rows.items[i].tcp_flags,
                 rows.items[i].tcp_ack,
                 rows.items[i].tcp_seq,
+                rows.items[i].tcp_window_size,
                 rows.items[i].info
           );
     }
@@ -328,13 +331,73 @@ int printTree(Tree* tree){
 
 /////////////////////////////
 // Find and print congestion events from an array of Rows
-int printCongestionEvents(Rows rows){
-    for (int i=0; i<rows.count; i++){
+
+typedef struct{
+    char* source;
+    char* destination;
+    Tree* acks;
+    Tree* seqs;
+} Conversation;
+
+typedef struct {
+    Conversation *items;
+    size_t capacity;
+    size_t count;
+} Conversations;
+
+int compareConversations(Conversation* first, Conversation* second){
+    return !(strcmp(first->source, second->source) || (strcmp(first->destination, second->destination)));
+}
+
+Conversation* initConversation(char* source, char* destination){
+    Conversation* conversation = (Conversation*) malloc(sizeof(Conversation));
+    conversation->source = source;
+    conversation->destination = destination;
+    conversation->acks = initTree(25000);
+    conversation->seqs = initTree(25000);
+    return conversation;
+}
+
+Rows reno = { 0 };
+Rows taho = { 0 };
+
+int handleCongestionEvents(Rows rows){
+    // create a Conversation struct to keep track of duplicate acks for each conversation
+    Conversations conversations = { 0 };
+    Conversation* conversation = initConversation(rows.items[0].source, rows.items[0].destination);
+
+    for (size_t i=0; i<rows.count; i++){
         // triple duplicate ACKs.
         // Look for Four ACKS with the same ACK number from the same machine to another
+        int same = 0;
+        int found = 0;
+        for (size_t j=0; j<conversations.count; j++){
+            conversation->source = rows.items[i].source;
+            conversation->destination = rows.items[i].destination;
+            same = compareConversations(conversation, conversations.items+j);
+            if (same){
+                found = 1;
+                break;
+            }
+        }
+        if (!found){
+            da_append(&conversations, *conversation);
+        }
 
-        
-
+        // if this is an ack, add it to the tree
+        int tcpType = getTcpType(rows.items[i]);
+        if (tcpType & ACK){
+            addValueToTree(conversation->acks, rows.items[i].tcp_ack);
+        } 
+        if (tcpType & SYN){
+            addValueToTree(conversation->seqs, rows.items[i].tcp_seq);
+        }         
+        // if there are 4 acks of the same ack print it
+        int conversationIndex = valueIsInTree(conversation->acks, rows.items[i].tcp_ack);
+        if (conversationIndex > 0 && conversation->acks->data[conversationIndex].count >= 4){
+            printf("Triple duplicate ack!\n");
+        }
+        printTree(conversation->acks);
     }
 
     return 0;
@@ -356,5 +419,8 @@ int main(int argc, char** argv){
     Rows rows = parse_csv(csvFile);
     print_rows(rows);
 
+    handleCongestionEvents(rows);
+
     return 0;
 }
+
