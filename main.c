@@ -262,6 +262,7 @@ int handleRemovedNode(Tree* tree, size_t index){
             leftmost = getLeftChild(tree, leftmost);
         }
         tree->data[index].value = tree->data[rightExists].value;
+        tree->data[index].count= tree->data[rightExists].count;
         // handle the node that was taken from
         handleRemovedNode(tree, rightExists);
         return 0;
@@ -273,8 +274,10 @@ int handleRemovedNode(Tree* tree, size_t index){
         rightmost = getRightChild(tree, rightmost);
     }
     tree->data[index].value = tree->data[leftExists].value;
+    tree->data[index].count = tree->data[leftExists].count;
     // handle the node that was taken from
     handleRemovedNode(tree, leftExists);
+    return 0;
 }
 
 // remove a node from a tree by value.
