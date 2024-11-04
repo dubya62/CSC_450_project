@@ -14,6 +14,10 @@ build: main.o
 
 %.o: %.c
 	$(CC) -o $@ $< -c
+
+debug: main.c
+	$(CC) -g -o $@ $^
+
 	
 clean:
 	rm -rf main *.o *.exe
