@@ -4,7 +4,7 @@ CFLAGS := -ggdb
 
 main: main.o
 	$(CC) $(CFLAGS) -o $@ $^
-	./main
+	./main test_files/ProjectTrace.pcapng
 
 main.exe: main.c
 	$(WINDOWSCC) -o $@ $^ $(CFLAGS)

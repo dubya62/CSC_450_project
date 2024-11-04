@@ -8,7 +8,7 @@
 FILE* convert_pcap_to_csv(char* filename){
     char buffer[BUF_SIZE];
 
-    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e _ws.col.info", filename);
+    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e tcp.ack -e tcp.seq -e _ws.col.info", filename);
 
     FILE* pipe = popen(buffer, "r");
 
@@ -38,6 +38,8 @@ typedef struct {
     size_t tcp_segment_len;
     double tcp_delta;
     int tcp_flags;
+    size_t tcp_ack;
+    size_t tcp_seq;
     char *info;
 } Row;
 
@@ -108,6 +110,8 @@ Rows parse_csv(fp)
         row.tcp_delta = atof(read_column(&line));
         char *flags_col = read_column(&line);
         row.tcp_flags = *flags_col ? strtol(flags_col + 2, NULL, 16) : 0;
+        row.tcp_ack = atol(read_column(&line));
+        row.tcp_seq = atol(read_column(&line));
         row.info = strdup(line);
         da_append(&rows, row);
     }
@@ -132,6 +136,8 @@ void print_rows(rows)
     tcp_segment_len = %ld,\n\
     tcp_delta = %lf,\n\
     tcp_flags = 0x%04x,\n\
+    tcp_ack = %ld,\n\
+    tcp_seq = %ld,\n\
     info = \"%s\",\n\
 }\n",
                 rows.items[i].no,
@@ -143,6 +149,8 @@ void print_rows(rows)
                 rows.items[i].tcp_segment_len,
                 rows.items[i].tcp_delta,
                 rows.items[i].tcp_flags,
+                rows.items[i].tcp_ack,
+                rows.items[i].tcp_seq,
                 rows.items[i].info
           );
     }
@@ -154,6 +162,180 @@ void print_rows(rows)
 #define SYN 2
 #define SYNACK 3
 #define getTcpType(row) (((row.tcp_flags & 0x10) >> 4) | (row.tcp_flags & 0x2))
+
+/////////////////////////////
+// Tree data structure definition
+typedef struct TreeNode{
+    int active; // 4 bytes - whether or not this is an actual node
+    size_t value; // 8 bytes
+    int count; // special field for counting occurences 4 bytes
+
+} TreeNode;
+
+typedef struct Tree{
+    size_t capacity;
+    TreeNode* data;
+} Tree;
+
+
+Tree* initTree(size_t capacity){
+    Tree* result = (Tree*) malloc(sizeof(Tree));
+    result->capacity = capacity;
+    size_t allocationSize = sizeof(TreeNode) * capacity;
+    result->data = (TreeNode*) malloc(allocationSize);
+    memset(result->data, 0, allocationSize);
+    return result;
+}
+
+
+// get indices of interest. -1 if invalid
+#define getLeftChild(tree, index) (-1 * ((index << 1) + 1 >= tree->capacity) + ((index << 1) + 1) * (((index) << 1) + 1< tree->capacity))
+#define getRightChild(tree, index) (-1 * ((index << 1) + 2 >= tree->capacity) + ((index << 1) + 2) * ((index << 1) + 2 < tree->capacity))
+#define getParent(tree, index) ((-1 * (index == 0)) + ((index-1) >> 1) * (index != 0))
+
+// returns index of the value or -1 if not in the tree
+size_t valueIsInTree(Tree* tree, size_t value){
+    size_t curr = 0;
+    while (1){
+        if (!(tree->data[curr].active)){
+            return -1;
+        }
+        if (tree->data[curr].value == value){
+            return curr;
+        } 
+        if (tree->data[curr].value > value){
+            curr = getLeftChild(tree, curr);
+        } else {
+            curr = getRightChild(tree, curr);
+        }
+        if (curr == -1){
+            return curr;
+        }
+    }
+}
+
+// creates a new node if the element does not exists
+// or increases the count if it does
+// return 1 if a new node was created, 0 if added to the count, or -1 if no room
+int addValueToTree(Tree* tree, size_t value){
+    size_t curr = 0;
+    while (1){
+        if (!(tree->data[curr].active)){
+            // this is where it should go
+            tree->data[curr].active = 1;
+            tree->data[curr].value = value;
+            tree->data[curr].count = 1;
+            return 1;
+        }
+        if (tree->data[curr].value == value){
+            // increment the count
+            tree->data[curr].count++;
+            return 0;
+        }
+        if (tree->data[curr].value > value){
+            curr = getLeftChild(tree, curr);
+        } else {
+            curr = getRightChild(tree, curr);
+        }
+        if (curr == -1){
+            return -1;
+        }
+    }
+}
+
+// remove a given index from the tree and replace it with its successor
+int handleRemovedNode(Tree* tree, size_t index){
+    // go left, then right as far as possible
+    int leftExists = getLeftChild(tree, index);
+    if (leftExists == -1 || !(tree->data[leftExists].active)){
+        // go right, then left as far as possible
+        int rightExists = getRightChild(tree, index);
+        if (rightExists == -1 || !(tree->data[rightExists].active)){
+            // this node has no children. Exterminate
+            tree->data[index].active = 0;
+            return 0;
+        }
+        // now go left until a -1
+        int leftmost = rightExists;
+        while (leftmost != -1 && tree->data[leftmost].active){
+            rightExists = leftmost;
+            leftmost = getLeftChild(tree, leftmost);
+        }
+        tree->data[index].value = tree->data[rightExists].value;
+        // handle the node that was taken from
+        handleRemovedNode(tree, rightExists);
+        return 0;
+    }
+    // now go right until a -1
+    int rightmost = leftExists;
+    while (rightmost != -1 && tree->data[rightmost].active){
+        leftExists = rightmost;
+        rightmost = getRightChild(tree, rightmost);
+    }
+    tree->data[index].value = tree->data[leftExists].value;
+    // handle the node that was taken from
+    handleRemovedNode(tree, leftExists);
+}
+
+// remove a node from a tree by value.
+// return 1 if a node was deleted; otherwise -1
+int removeValueFromTree(Tree* tree, size_t value){
+    size_t curr = 0;
+    while (1){
+        if (!(tree->data[curr].active)){
+            // this node does not exist
+            return -1;
+        }
+        if (tree->data[curr].value == value){
+            // delete this node
+            handleRemovedNode(tree, curr);
+            return 0;
+        }
+        if (tree->data[curr].value > value){
+            curr = getLeftChild(tree, curr);
+        } else {
+            curr = getRightChild(tree, curr);
+        }
+        if (curr == -1){
+            return -1;
+        }
+    }
+
+}
+
+// print tree
+int printSubtree(Tree* tree, size_t index){
+    int leftChild = getLeftChild(tree, index);
+    int rightChild = getRightChild(tree, index);
+    if (leftChild != -1){
+        printSubtree(tree, leftChild);
+    }
+    if (tree->data[index].active){
+        printf("%ld:%ld:%d\n", index, tree->data[index].value, tree->data[index].count);
+    }
+    if (rightChild != -1){
+        printSubtree(tree, rightChild);
+    }
+
+}
+int printTree(Tree* tree){
+    printf("Index:Value:Count\n");
+    printSubtree(tree, 0);
+}
+
+/////////////////////////////
+// Find and print congestion events from an array of Rows
+int printCongestionEvents(Rows rows){
+    for (int i=0; i<rows.count; i++){
+        // triple duplicate ACKs.
+        // Look for Four ACKS with the same ACK number from the same machine to another
+
+        
+
+    }
+
+    return 0;
+}
 
 /////////////////////////////
 
@@ -170,7 +352,6 @@ int main(int argc, char** argv){
 
     Rows rows = parse_csv(csvFile);
     print_rows(rows);
-
 
     return 0;
 }
