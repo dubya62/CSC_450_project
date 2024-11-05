@@ -1,19 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <assert.h>
 
 #define BUF_SIZE 1024
-
-FILE* convert_pcap_to_csv(char* filename){
-    char buffer[BUF_SIZE];
-
-    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e tcp.ack -e tcp.seq -e tcp.window_size_value -e _ws.col.info", filename);
-
-    FILE* pipe = popen(buffer, "r");
-
-    return pipe;
-}
+#define alpha 0.125
+#define beta 0.25
+#define SAMPLE_SIZE 10
 
 #define DBG(...) do {                                      \
     fprintf(stderr, "[DBG] %s:%d ", __FILE__, __LINE__);   \
@@ -28,7 +22,37 @@ FILE* convert_pcap_to_csv(char* filename){
     exit(1);                                               \
 } while (0);
 
+
+#define da_append(da, item)                                                              \
+    do {                                                                                 \
+        if ((da)->count >= (da)->capacity) {                                             \
+            (da)->capacity = (da)->capacity == 0 ? BUF_SIZE : (da)->capacity*2;   \
+            (da)->items = realloc((da)->items, (da)->capacity*sizeof(*(da)->items)); \
+            assert((da)->items != NULL && "Buy more RAM lol");                       \
+        }                                                                                \
+                                                                                         \
+        (da)->items[(da)->count++] = (item);                                             \
+    } while (0)
+
+/////////////////////////////
+// checking the bits of flags to see if SYN, ACK, or SYNACK (0 if neither
+#define ACK (1 << 4)
+#define SYN (1 << 1)
+
+FILE* convert_pcap_to_csv(char* filename){
+    char buffer[BUF_SIZE];
+
+    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e tcp.ack -e tcp.seq -e tcp.window_size_value -e _ws.col.info", filename);
+
+    FILE* pipe = popen(buffer, "r");
+
+    return pipe;
+}
+
 typedef struct {
+    size_t cwnd;
+    size_t ssthresh;
+    int congestionEvent;
     int no;
     double time;
     char *source;
@@ -87,17 +111,6 @@ typedef struct {
     size_t capacity;
     size_t count;
 } Rows;
-
-#define da_append(da, item)                                                              \
-    do {                                                                                 \
-        if ((da)->count >= (da)->capacity) {                                             \
-            (da)->capacity = (da)->capacity == 0 ? BUF_SIZE : (da)->capacity*2;   \
-            (da)->items = realloc((da)->items, (da)->capacity*sizeof(*(da)->items)); \
-            assert((da)->items != NULL && "Buy more RAM lol");                       \
-        }                                                                                \
-                                                                                         \
-        (da)->items[(da)->count++] = (item);                                             \
-    } while (0)
 
 typedef struct {
     size_t key;
@@ -162,8 +175,13 @@ char *escape_quotes(char *str) {
 }
 
 void write_csv(FILE *out, Rows rows) {
+    fprintf(out, "cwnd, ssthresh, congestionEvent, no, time, source, destination, protocol, length, tcp_segment_len, tcp_delta, tcp_flags, tcp_ack, tcp_seq, tcp_window_size, info\n");
+
     for (size_t i = 0; i < rows.count; ++i) {
         Row row = rows.items[i];
+        fprintf(out, "%ld,", row.cwnd);
+        fprintf(out, "%ld,", row.ssthresh);
+        fprintf(out, "%d,", row.congestionEvent);
         fprintf(out, "%d,", row.no);
         fprintf(out, "%f,", row.time);
         char *s = escape_quotes(row.source);
@@ -180,9 +198,8 @@ void write_csv(FILE *out, Rows rows) {
         fprintf(out, "%ld,", row.tcp_ack);
         fprintf(out, "%ld,", row.tcp_seq);
         fprintf(out, "%ld,", row.tcp_window_size);
-        s = escape_quotes(row.info);
-        fprintf(out, "\"%s\"", s);
-        free(s);
+        remove_chars(row.info, '"');
+        fprintf(out, "\"%s\"", row.info);
         fprintf(out, "\n");
     }
 }
@@ -209,10 +226,6 @@ void print_rows(rows)
     }
 }
 
-/////////////////////////////
-// checking the bits of flags to see if SYN, ACK, or SYNACK (0 if neither
-#define ACK (1 << 4)
-#define SYN (1 << 1)
 
 /////////////////////////////
 // Find and print congestion events from an array of Rows
@@ -256,7 +269,55 @@ int handleCongestionEvents(Rows rows){
         0
     };
 
+    size_t renoCwnd = 1;
+    size_t tahoCwnd = 1;
+    size_t renoSsthresh = 8;
+    size_t tahoSsthresh = 8;
+    double sampleRtt = 0.0;
+    int sampleSize = 0;
+    double estimatedRtt = 0.0;
+    double timeoutInterval = 0.0;
+    double devRtt = 0.0;
+
+    double samples[SAMPLE_SIZE] = {0};
+    int currSample = 0;
+    double averageRtt = 0.0;
+
     for (size_t i=0; i<rows.count; i++){
+        // generate an estimatedRtt
+        // work backwards to find ack packet, then back from that to find acked segment
+        if (rows.items[i].tcp_flags & ACK){
+            // find corresponding SYN
+            for (int j=i; j>=0; j--){
+                if (rows.items[j].tcp_seq + rows.items[j].tcp_segment_len == rows.items[i].tcp_ack){
+                    // subtract the time to get the rtt
+                    sampleRtt = rows.items[i].time - rows.items[j].time;
+                    // place the sample in the correct spot
+                    averageRtt *= sampleSize;
+                    averageRtt -= samples[(currSample+1) % SAMPLE_SIZE];
+                    if (sampleSize < SAMPLE_SIZE){
+                        sampleSize++;
+                    }
+                    samples[currSample] = sampleRtt;
+                    averageRtt += sampleRtt;
+                    averageRtt /= sampleSize;
+                    currSample++;
+                    currSample %= SAMPLE_SIZE;
+                    break;
+                }
+            }
+        }
+        printf("Average Rtt: %lf\n", averageRtt);
+        // find estimated rtt
+        estimatedRtt = (1 - alpha) * estimatedRtt + alpha * averageRtt;
+        printf("Estimated Rtt: %lf\n", estimatedRtt);
+        // find devRtt
+        devRtt = (1 - beta) * devRtt + beta * fabs(averageRtt - estimatedRtt);
+        printf("devRtt: %lf\n", devRtt);
+        timeoutInterval = estimatedRtt + devRtt * 4;
+        printf("Timout Interval: %lf\n", timeoutInterval);
+        
+
         // triple duplicate ACKs.
         // Look for Four ACKS with the same ACK number from the same machine to another
         int same = 0;
@@ -276,15 +337,15 @@ int handleCongestionEvents(Rows rows){
 
         // if this is an ack, add it to the tree
         int tcpType = rows.items[i].tcp_flags;
-        if (tcpType & ACK){
-            size_t *entry = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
+        if (tcpType & ACK && !(tcpType & SYN)){
+            size_t* entry = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
             if (entry) {
                 *entry += 1;
             } else {
                 da_append(&conversation.acks, ((Entry) { .key = rows.items[i].tcp_ack, .value = 1 }));
             }
-        } else { // if this is not an ack, check for retransmission
-            size_t *entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
+        } else if (rows.items[i].tcp_seq > 1){ 
+            size_t* entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
             if (entry){
                 *entry += 1;
             } else {
@@ -293,29 +354,75 @@ int handleCongestionEvents(Rows rows){
             
         }
         if (tcpType & SYN){
-            size_t *entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_ack);
+            size_t* entry = get_dict_entry(conversation.seqs, rows.items[i].tcp_ack);
             if (entry) {
                 *entry += 1;
             } else {
                 da_append(&conversation.seqs, ((Entry) { .key = rows.items[i].tcp_ack, .value = 1 }));
             }
         }         
-        // if there are 4 acks of the same ack print it
+        // if there are 4 acks of the same ack print it size_t* count = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
+        int congestionEvent = 0;
         size_t* count = get_dict_entry(conversation.acks, rows.items[i].tcp_ack);
+
         if (count && *count >= 4) {
+            *count = 0;
             printf("Triple duplicate ack!\n");
+            congestionEvent = 1;
         }
 
         // if there are 2 seqs of the same seq print it
         count = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
         if (count && *count >= 2) {
+            *count = 0;
             printf("Retransmission!\n");
+            congestionEvent = 1;
         }
 
         // check window size
         if (rows.items[i].tcp_window_size < 10){
             printf("Window size too small!\n");
+            congestionEvent = 1;
         }
+
+        // cwnd = 1 MSS,
+        // doubled every RTT, switch to linear when reaching half of its timeout cwnd
+        // cwnd = sent, but not acked + available but not used
+        // taho - cut to 1 MSS when triple dup
+        // reno - cut in half when triple dup
+        da_append(&taho, rows.items[i]);
+        da_append(&reno, rows.items[i]);
+
+        taho.items[taho.count-1].congestionEvent = congestionEvent;
+        reno.items[reno.count-1].congestionEvent = congestionEvent;
+
+        taho.items[taho.count-1].cwnd = tahoCwnd;
+        reno.items[reno.count-1].cwnd = renoCwnd;
+        taho.items[taho.count-1].ssthresh = tahoSsthresh;
+        reno.items[reno.count-1].ssthresh = renoSsthresh;
+
+        if (congestionEvent){
+            renoSsthresh = renoCwnd >> 1;
+            tahoSsthresh = tahoCwnd >> 1;
+            tahoCwnd = 1;
+            renoCwnd >>= 1;
+        } else if (tcpType & ACK) {
+            // Add tahoe
+            if (tahoCwnd < tahoSsthresh){ 
+                tahoCwnd <<= 1;
+            } else {
+                tahoCwnd -=- 1;
+            }
+            
+            // Add reno
+            if (renoCwnd < renoSsthresh){ 
+                renoCwnd <<= 1;
+            } else {
+                renoCwnd -=- 1;
+            }
+        }
+
+
 
 
     }
@@ -339,7 +446,12 @@ int main(int argc, char** argv){
     printf("\n"); // make jumping easier in tmux
     handleCongestionEvents(rows);
     printf("\n"); // make jumping easier in tmux
-    //write_csv(stdout, rows);
+
+    FILE* tahoFile = fopen("taho_output.csv", "w");
+    FILE* renoFile = fopen("reno_output.csv", "w");
+
+    write_csv(tahoFile, taho);
+    write_csv(renoFile, reno);
 
     return 0;
 }
