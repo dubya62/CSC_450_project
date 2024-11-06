@@ -376,7 +376,6 @@ int handleCongestionEvents(Rows rows){
 
         if (count && *count >= 4) {
             *count = 0;
-            // printf("Triple duplicate ack!\n");
             congestionEvent = 1;
         }
 
@@ -384,15 +383,11 @@ int handleCongestionEvents(Rows rows){
         count = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
         if (count && *count >= 2) {
             *count = 0;
-            // printf("Retransmission!\n");
             congestionEvent = 1;
         }
 
         // check window size
-        if (rows.items[i].tcp_window_size < 10){
-            // printf("Window size too small!\n");
-            congestionEvent = 1;
-        }
+        congestionEvent |= rows.items[i].tcp_window_size < 10;
 
         if (~i & 512) {
             printf(".");
@@ -422,18 +417,9 @@ int handleCongestionEvents(Rows rows){
             renoCwnd >>= 1;
         } else if (tcpType & ACK) {
             // Add tahoe
-            if (tahoCwnd < tahoSsthresh){ 
-                tahoCwnd <<= 1;
-            } else {
-                tahoCwnd -=- 1;
-            }
-            
+            tahoCwnd += (tahoCwnd * (tahoCwnd < tahoSsthresh)) + (tahoCwnd >= tahoSsthresh);
             // Add reno
-            if (renoCwnd < renoSsthresh){ 
-                renoCwnd <<= 1;
-            } else {
-                renoCwnd -=- 1;
-            }
+            renoCwnd += (renoCwnd * (renoCwnd < renoSsthresh)) + (renoCwnd >= renoSsthresh);
         }
     }
     printf("\n");
