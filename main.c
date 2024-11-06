@@ -376,7 +376,7 @@ int handleCongestionEvents(Rows rows){
 
         if (count && *count >= 4) {
             *count = 0;
-            printf("Triple duplicate ack!\n");
+            // printf("Triple duplicate ack!\n");
             congestionEvent = 1;
         }
 
@@ -384,14 +384,19 @@ int handleCongestionEvents(Rows rows){
         count = get_dict_entry(conversation.seqs, rows.items[i].tcp_seq);
         if (count && *count >= 2) {
             *count = 0;
-            printf("Retransmission!\n");
+            // printf("Retransmission!\n");
             congestionEvent = 1;
         }
 
         // check window size
         if (rows.items[i].tcp_window_size < 10){
-            printf("Window size too small!\n");
+            // printf("Window size too small!\n");
             congestionEvent = 1;
+        }
+
+        if (~i & 512) {
+            printf(".");
+            fflush(stdout);
         }
 
         // cwnd = 1 MSS,
@@ -430,11 +435,8 @@ int handleCongestionEvents(Rows rows){
                 renoCwnd -=- 1;
             }
         }
-
-
-
-
     }
+    printf("\n");
 
     return 0;
 }
