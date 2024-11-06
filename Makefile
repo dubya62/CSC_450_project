@@ -1,6 +1,6 @@
 CC := gcc
 WINDOWSCC := x86_64-w64-mingw32-gcc
-CFLAGS := -ggdb -lm
+CFLAGS := -O3 -lm
 
 main: main.o
 	$(CC) $(CFLAGS) -o $@ $^
