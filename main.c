@@ -23,15 +23,15 @@
 } while (0);
 
 
-#define da_append(da, item)                                                              \
-    do {                                                                                 \
-        if ((da)->count >= (da)->capacity) {                                             \
-            (da)->capacity = (da)->capacity == 0 ? BUF_SIZE : (da)->capacity*2;   \
+#define da_append(da, item)                                                          \
+    do {                                                                             \
+        if ((da)->count >= (da)->capacity) {                                         \
+            (da)->capacity = (da)->capacity == 0 ? BUF_SIZE : (da)->capacity*2;      \
             (da)->items = realloc((da)->items, (da)->capacity*sizeof(*(da)->items)); \
             assert((da)->items != NULL && "Buy more RAM lol");                       \
-        }                                                                                \
-                                                                                         \
-        (da)->items[(da)->count++] = (item);                                             \
+        }                                                                            \
+                                                                                     \
+        (da)->items[(da)->count++] = (item);                                         \
     } while (0)
 
 /////////////////////////////
@@ -39,14 +39,33 @@
 #define ACK (1 << 4)
 #define SYN (1 << 1)
 
-FILE* convert_pcap_to_csv(char* filename){
+FILE *convert_pcap_to_csv(filename)
+    const char *filename;
+{
     char buffer[BUF_SIZE];
 
-    snprintf(buffer, BUF_SIZE, "tshark -r %s -T fields -Eseparator=',' -e frame.number -e frame.time_relative -e ip.src -e ip.dst -e ip.proto -e frame.len -e tcp.len -e tcp.time_delta -e tcp.flags -e tcp.ack -e tcp.seq -e tcp.window_size_value -e _ws.col.info", filename);
+    snprintf(buffer, BUF_SIZE,
+        "tshark "
+        "-r %s "
+        "-T fields "
+        "-Eseparator=',' "
+        "-e frame.number "
+        "-e frame.time_relative "
+        "-e ip.src "
+        "-e ip.dst "
+        "-e ip.proto "
+        "-e frame.len "
+        "-e tcp.len "
+        "-e tcp.time_delta "
+        "-e tcp.flags "
+        "-e tcp.ack "
+        "-e tcp.seq "
+        "-e tcp.window_size_value "
+        "-e _ws.col.info",
+        filename
+    );
 
-    FILE* pipe = popen(buffer, "r");
-
-    return pipe;
+    return popen(buffer, "r");
 }
 
 typedef struct {
@@ -92,13 +111,9 @@ char *read_column(ptr)
 
     char skip = 0;
     for (;**ptr; *ptr += 1) {
-        if (skip) {
-            skip = 0;
-            continue;
-        }
-
-        if (**ptr == '\\') skip = 1;
-        if (**ptr == ',') break;
+        if (skip) skip = 0;
+        else if (**ptr == '\\') skip = 1;
+        else if (**ptr == ',') break;
     }
     *(*ptr)++ = '\0';
     if (**ptr == ',') *ptr += 1;
@@ -134,7 +149,7 @@ Rows parse_csv(fp)
         size_t len = strlen(buf);
         if (buf[len - 1] == '\n') buf[--len] = '\0';
         char *line = buf;
-        printf("line = %s\n", line);
+        // printf("line = %s\n", line);
         Row row = { 0 };
         row.no = atoi(read_column(&line));
         row.time = atof(read_column(&line));
@@ -307,15 +322,9 @@ int handleCongestionEvents(Rows rows){
                 }
             }
         }
-        printf("Average Rtt: %lf\n", averageRtt);
-        // find estimated rtt
         estimatedRtt = (1 - alpha) * estimatedRtt + alpha * averageRtt;
-        printf("Estimated Rtt: %lf\n", estimatedRtt);
-        // find devRtt
         devRtt = (1 - beta) * devRtt + beta * fabs(averageRtt - estimatedRtt);
-        printf("devRtt: %lf\n", devRtt);
         timeoutInterval = estimatedRtt + devRtt * 4;
-        printf("Timout Interval: %lf\n", timeoutInterval);
         
 
         // triple duplicate ACKs.
@@ -442,7 +451,7 @@ int main(int argc, char** argv){
 
     Rows rows = parse_csv(csvFile);
     printf("\n"); // make jumping easier in tmux
-    print_rows(rows);
+    // print_rows(rows);
     printf("\n"); // make jumping easier in tmux
     handleCongestionEvents(rows);
     printf("\n"); // make jumping easier in tmux
